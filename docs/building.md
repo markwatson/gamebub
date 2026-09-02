@@ -150,3 +150,27 @@ $ python3 flash_nvs.py --serial serialno --revision 2
 ```
 
 The device should automatically reboot into the main menu.
+
+### Building a UF2 update file
+
+Firmware can also be packaged as a UF2 file and installed through the DFU bootloader's virtual USB drive, without a serial connection. This is how the updates on the [releases page](https://github.com/elipsitz/gamebub/releases) are distributed -- see the [firmware update guide](https://docs.gamebub.net/user-guide/firmware-updates/) for how to enter DFU mode and install one.
+
+From `/firmware/handheld`, build the firmware, save the application image, pad it to a multiple of 256 bytes, and wrap it in a UF2:
+
+```sh
+$ cargo build --release --features=rev2
+$ espflash save-image --chip esp32s3 target/xtensa-esp32s3-espidf/release/handheld handheld.bin
+$ python3 -c 'import sys; f = open(sys.argv[1], "ab"); f.write(b"\xff" * (-f.tell() % 256))' handheld.bin
+$ esptool.py --chip esp32s3 merge_bin --format uf2 --chunk-size 256 -o handheld.uf2 0x100000 handheld.bin
+```
+
+`0x100000` is the offset of the `factory` partition in `partitions.csv`. Writing UF2 files requires esptool v4.6 or newer -- the copy installed alongside ESP-IDF works (`~/.espressif/python_env/idf*/bin/python -m esptool`).
+
+The DFU bootloader silently ignores any block it doesn't accept (see `firmware/handheld-dfu/src/virtual_disk.rs`). A file with rejected blocks looks like a copy that never finishes: the device waits for the missing blocks and never reboots. In particular:
+
+* Every block's payload must be exactly 256 bytes. Pass `--chunk-size 256` (esptool otherwise uses the largest size that fits, 476), and pad the image first, or the short final block esptool emits will be dropped.
+* The UF2 family ID must be `0xc47e5767` (ESP32-S3), which `--chip esp32s3` sets.
+* Nothing below `0x80000` can be written -- the bootloader, the DFU partition itself, and the read-only NVS partition are write protected. Don't build the UF2 from a merged full-flash image.
+* Only one region per file. The device reboots as soon as every block of a transfer has arrived, and esptool restarts block numbering for each input file, so a second region would never be written. To also update the system data partition, build a separate UF2 at offset `0x600000` from a FAT image (`fatfsgen.py`, as used by `flash_system_data.py`), and copy it after rebooting back into DFU mode.
+
+Release builds additionally carry a UF2 extension tag naming the hardware revision they were built for, which the bootloader checks before writing. Files built with the commands above have no such tag and will install on any revision, so take care to build with the `--features` flag matching your board.
