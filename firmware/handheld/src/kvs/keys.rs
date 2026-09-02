@@ -44,6 +44,10 @@ pub static GBA_ENABLE_GBP: KvsKey<bool> = KvsKey::new_with_default("gba-enable-g
 /// Startup action.
 pub static STARTUP_ACTION: KvsKey<i32> = KvsKey::new_with_default("startup-action", 0);
 
+/// How long the device may sit idle in a menu before powering off.
+/// Index into `ui::idle::POWER_OFF_TIMEOUTS`.
+pub static AUTO_POWER_OFF: KvsKey<i32> = KvsKey::new_with_default("auto-power-off", 2);
+
 /// Last firmware version
 pub static LAST_FIRMWARE_VERSION: KvsKey<String> = KvsKey::new("last-fw-version");
 
@@ -62,5 +66,6 @@ pub fn flush_all() {
     GBA_COLOR_PROFILE.flush();
     GBA_ENABLE_GBP.flush();
     STARTUP_ACTION.flush();
+    AUTO_POWER_OFF.flush();
     LAST_FIRMWARE_VERSION.flush();
 }

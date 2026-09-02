@@ -76,6 +76,12 @@ mod settings {
                 key: &keys::STARTUP_ACTION,
                 choices: &["Main Menu", "Run Cartridge"],
             },
+            // Must be kept in sync with `ui::idle::POWER_OFF_TIMEOUTS`.
+            Entry::List {
+                name: "Auto Power Off",
+                key: &keys::AUTO_POWER_OFF,
+                choices: &["Off", "2 minutes", "5 minutes", "10 minutes", "30 minutes"],
+            },
         ],
     };
 

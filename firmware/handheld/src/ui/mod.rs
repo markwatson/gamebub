@@ -1,4 +1,5 @@
 pub mod buttons;
+mod idle;
 mod screenshot;
 mod slint;
 mod state;
@@ -17,12 +18,10 @@ use ::slint::{
 
 use crate::device::{Device, DisplayMode};
 use crate::input::{self, InputManager};
-use crate::worker;
+use crate::kvs;
 pub use state::notifications::Notification;
 
 use self::{slint::Argb1555, slint::MinimalSoftwareWindow, state::UiState};
-
-const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 cfg_if::cfg_if! {
     if #[cfg(any(feature = "rev1", feature = "rev2"))] {
@@ -71,6 +70,8 @@ pub enum Message {
     DockEnd,
     /// Take a UI screenshot
     Screenshot,
+    /// The idle timer expired.
+    IdleTimeout,
 }
 
 /// Send a message to the UI thread.
@@ -120,6 +121,10 @@ pub struct UI {
     state: Rc<RefCell<UiState>>,
     button_event_detector: buttons::ButtonEventDetector,
     idle_timer: Timer,
+    /// When the user was last active.
+    idle_since: Instant,
+    /// Whether the screen is currently dimmed because the device is idle.
+    idle_dimmed: bool,
 }
 
 impl UI {
@@ -141,12 +146,6 @@ impl UI {
                 .fpga
                 .write_u32(crate::bitstream::boot::REG_LOGO_ANIM, animation)
                 .unwrap(); // Start animation (no loop)
-        });
-
-        // Set up the idle timer
-        let idle_timer = Timer::default();
-        idle_timer.start(TimerMode::Repeated, IDLE_TIMEOUT, || {
-            worker::send(worker::Message::IdleTimerExpired);
         });
 
         let (sender, receiver) = mpsc::channel::<Message>();
@@ -175,7 +174,9 @@ impl UI {
             state: UiState::new(&root, device),
             root,
             button_event_detector: buttons::ButtonEventDetector::new(),
-            idle_timer,
+            idle_timer: Timer::default(),
+            idle_since: Instant::now(),
+            idle_dimmed: false,
         };
         ui
     }
@@ -183,6 +184,8 @@ impl UI {
     pub fn run(&mut self) -> ! {
         // Set this thread (UI) to higher priority than background threads.
         unsafe { esp_idf_svc::sys::vTaskPrioritySet(std::ptr::null_mut(), 10) };
+
+        self.idle_reset();
 
         let mut pending_message = None;
         loop {
@@ -193,7 +196,7 @@ impl UI {
             }
             for button_event in self.button_event_detector.update(None) {
                 self.window.dispatch_event(button_event.into());
-                self.idle_timer.restart();
+                self.idle_reset();
             }
 
             ::slint::platform::update_timers_and_animations();
@@ -247,11 +250,65 @@ impl UI {
         }
     }
 
+    /// Schedule the next expiration of the idle timer.
+    fn idle_schedule(&self, delay: Duration) {
+        self.idle_timer
+            .start(TimerMode::SingleShot, delay, || send(Message::IdleTimeout));
+    }
+
+    /// Note user activity: undo any dimming and restart the idle countdown.
+    fn idle_reset(&mut self) {
+        self.idle_since = Instant::now();
+        if self.idle_dimmed {
+            idle::set_dimmed(false);
+            self.idle_dimmed = false;
+        }
+        self.idle_schedule(idle::DIM_TIMEOUT);
+    }
+
+    /// Advance the idle sequence: first dim the screen, then power off.
+    fn idle_timeout(&mut self) {
+        // Input can arrive between the timer firing and this message being
+        // handled, in which case the user isn't idle after all. Powering off out
+        // from under a button press would be rude, so re-check the elapsed time.
+        // Any input clears `idle_dimmed`, so this covers both stages.
+        let idle_for = self.idle_since.elapsed();
+        if idle_for < idle::DIM_TIMEOUT {
+            self.idle_schedule(idle::DIM_TIMEOUT - idle_for);
+            return;
+        }
+
+        // A device left sitting on the setup screen has nothing to stay on for.
+        if kvs::keys::SETUP_STAGE.get().unwrap_or_default() == 0 {
+            log::warn!("Idle during setup, powering off.");
+            Device::lock().power_off();
+        }
+
+        if !idle::may_idle() {
+            self.idle_schedule(idle::DIM_TIMEOUT);
+            return;
+        }
+
+        if !self.idle_dimmed {
+            idle::set_dimmed(true);
+            self.idle_dimmed = true;
+        } else if idle::may_power_off() {
+            idle::power_off();
+        }
+
+        // Once dimmed, wait out the rest of the automatic power off timeout. If
+        // it's disabled, or the device is running off USB power, the screen just
+        // stays dim until the next button press.
+        if let Some(delay) = idle::power_off_delay() {
+            self.idle_schedule(delay);
+        }
+    }
+
     /// Handle a message sent to the UI thread.
     fn dispatch_message(&mut self, message: Message) {
         match message {
             Message::Button(state) => {
-                self.idle_timer.restart();
+                self.idle_reset();
                 for button_event in self.button_event_detector.update(Some(state)) {
                     self.window.dispatch_event(button_event.into());
                 }
@@ -309,10 +366,13 @@ impl UI {
                 backend.set_dock_serial(serial.into());
                 backend.set_dock_firmware_version(firmware.into());
                 backend.set_docked(true);
+                self.idle_reset();
             }
             Message::DockEnd => {
                 self.root.global::<slint::Backend>().set_docked(false);
+                self.idle_reset();
             }
+            Message::IdleTimeout => self.idle_timeout(),
             Message::Screenshot => {
                 match screenshot::save_ui_screenshot(&self.window, &mut self.framebuffer) {
                     Ok(f) => log::info!("Saved UI screenshot to {f}"),

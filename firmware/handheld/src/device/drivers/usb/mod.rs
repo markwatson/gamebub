@@ -27,6 +27,11 @@ struct UsbState {
     descriptors: Option<Box<Descriptors>>,
 }
 
+/// Get the currently configured USB mode.
+pub fn current_mode() -> UsbMode {
+    STATE.lock().unwrap().mode
+}
+
 pub fn configure_usb(mode: UsbMode) -> Result<(), EspError> {
     let mut state = STATE.lock().unwrap();
     if mode == state.mode {
