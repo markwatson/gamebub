@@ -159,11 +159,11 @@ export component FileListViewBase inherits ListView {
 
     protected function set-focus-item(index: int) {
         if wrap {
-            focus-item = mod(index, root.model.length);
+            root.focus-item = mod(index, root.model.length);
+            root.bring-into-view(root.focus-item);
         } else {
-            root.focus-item = min(root.model.length - 1, max(0, index));
+            root.set-focus-item-clamped(index);
         }
-        root.bring-into-view(root.focus-item);
     }
 
     for item[index] in root.model: FileListItem {
