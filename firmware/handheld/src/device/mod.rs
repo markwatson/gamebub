@@ -115,6 +115,26 @@ pub struct Device<'a> {
     pub docked: bool,
 }
 
+/// Release the pad hold that [`Device::power_off`] leaves on `pin`.
+///
+/// Holds on RTC-capable pads survive everything but a power-on reset, and an
+/// output driver cannot overrule one, so nothing else undoes them. A power off
+/// that ends in a brown-out reset rather than actually cutting power comes back
+/// with the power switch line still latched low -- which the power switch
+/// circuit reads as the button being held, and [`Device::get_input_state`]
+/// reads as a Power button stuck down.
+///
+/// Releasing a hold drops the pad to whatever its live configuration says, so
+/// only call this once `pin` is configured and driven to the level it should
+/// keep.
+fn release_pad_hold(pin: esp_idf_svc::sys::gpio_num_t) {
+    // SAFETY: FFI into ESP-IDF, which only touches GPIO hardware registers and
+    // is valid to call at any time. esp-idf-hal 0.45 wraps no pad hold API.
+    if let Err(e) = esp_idf_svc::sys::esp!(unsafe { esp_idf_svc::sys::gpio_hold_dis(pin) }) {
+        log::warn!("Failed to release hold on GPIO {pin}: {e}");
+    }
+}
+
 impl Device<'_> {
     pub fn init() -> Result<(), anyhow::Error> {
         if let Some(_) = DEVICE.get() {
@@ -289,6 +309,24 @@ impl Device<'_> {
         fpga_power.set_high()?;
         let fpga_power_time = Instant::now();
 
+        // Drop the pad holds `power_off` left behind, as early as init can: a
+        // hold can only be released once its pad is driven to the level it
+        // should keep, but every moment before that the power switch pad is
+        // still latched low, which the power circuit reads as the Power button
+        // being held -- and its hold-to-force-off timer has been running since
+        // before the reset. Everything below (I2C, SPI, the LCD reset sequence)
+        // would otherwise run on borrowed time.
+        //
+        // `fpga_power` is the only digital (non-RTC) pad of the three, so this
+        // is also where the global deep-sleep hold gets cleared.
+        // SAFETY: FFI into ESP-IDF; only touches GPIO hardware registers.
+        unsafe { esp_idf_svc::sys::gpio_deep_sleep_hold_dis() };
+        release_pad_hold(fpga_power.pin());
+
+        let mut button_power = PinDriver::input_output_od(pin_power_switch)?;
+        button_power.set_high()?; // Open drain: high releases the line.
+        release_pad_hold(button_power.pin());
+
         // Initialize I2C
         // TODO: see if there's a good way to do this without making and leaking a Box
         let i2c_config = I2cConfig::new()
@@ -429,11 +467,10 @@ impl Device<'_> {
         let mut button_home = PinDriver::input(pin_home)?;
         let mut button_vol_up = PinDriver::input(pin_vol_up)?;
         let mut button_vol_down = PinDriver::input(pin_vol_down)?;
-        let mut button_power = PinDriver::input_output_od(pin_power_switch)?;
+        // `button_power` is set up much earlier, to release its pad hold.
         button_home.set_pull(gpio::Pull::Up)?;
         button_vol_up.set_pull(gpio::Pull::Up)?;
         button_vol_down.set_pull(gpio::Pull::Up)?;
-        button_power.set_high()?;
 
         // Cartridge switch and power
         let pin_cart_switch = pin_cart_switch
@@ -506,6 +543,7 @@ impl Device<'_> {
         let fpga_done = PinDriver::input(pin_fpga_done)?;
         let mut fpga_program_b = PinDriver::output_od(pin_fpga_program_b)?;
         fpga_program_b.set_high()?; // Initializing pin sets this to low -- release it to high-z immediately.
+        release_pad_hold(fpga_program_b.pin());
         let fpga_init_b = PinDriver::input(pin_fpga_init_b)?;
 
         let spi_rates = [40.MHz(), 20.MHz(), 16.MHz(), 10.MHz()];

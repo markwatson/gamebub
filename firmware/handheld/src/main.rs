@@ -42,6 +42,12 @@ fn main() -> anyhow::Result<()> {
         log::error!("USB setup failed: {:?}", e);
     }
 
+    // A power off that worked ends in a power-on reset. Anything else here
+    // means the device came back up without the rail actually collapsing.
+    log::info!(
+        "Reset reason: {:?}",
+        esp_idf_svc::hal::reset::ResetReason::get()
+    );
     log::info!("Hardware version: {}", hwinfo::get_hardware_version());
     log::info!("Serial: {}", hwinfo::get_serial_number());
     kvs::Kvs::init()?;
