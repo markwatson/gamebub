@@ -3,8 +3,13 @@ target = "xtensa-esp32s3-espidf"
 
 [target.xtensa-esp32s3-espidf]
 linker = "ldproxy"
-# runner = "espflash --monitor" # Select this runner for espflash v1.x.x
-runner = "espflash flash --monitor" # Select this runner for espflash v2.x.x
+# Every placement flag is passed explicitly: espflash v4 ignores the `[idf]`
+# section of espflash.toml, and without `--target-app-partition` it invents its
+# own partition table and writes the app over the `dfu` partition at 0x10000.
+# `--monitor` is deliberately absent: it reconnects with a flash stub after
+# flashing, which undoes the reset and leaves the device in download mode, and
+# the console is on UART0 so it has nothing to show anyway. See FLASHING.md.
+runner = "espflash flash --chip esp32s3 --bootloader bootloader.bin --partition-table partitions.csv --target-app-partition factory"
 rustflags = [
     "--cfg",
     "espidf_time64",
