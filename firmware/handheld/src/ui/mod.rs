@@ -252,8 +252,17 @@ impl UI {
 
     /// Schedule the next expiration of the idle timer.
     fn idle_schedule(&self, delay: Duration) {
-        self.idle_timer
-            .start(TimerMode::SingleShot, delay, || send(Message::IdleTimeout));
+        // `Timer::start` boxes a fresh callback every call, and this runs on
+        // every button event (including auto-repeats). Once the timer exists,
+        // retune it in place instead: `interval` is only zero before the first
+        // `start`, and a SingleShot timer keeps its callback after firing.
+        if self.idle_timer.interval().is_zero() {
+            self.idle_timer
+                .start(TimerMode::SingleShot, delay, || send(Message::IdleTimeout));
+        } else {
+            self.idle_timer.set_interval(delay);
+            self.idle_timer.restart();
+        }
     }
 
     /// Note user activity: undo any dimming and restart the idle countdown.
@@ -285,7 +294,12 @@ impl UI {
         }
 
         if !idle::may_idle() {
-            self.idle_schedule(idle::DIM_TIMEOUT);
+            // Not idleable: restart the countdown rather than banking the time
+            // spent here, so that leaving one of these states without a button
+            // press -- unplugging a USB session, ejecting a cartridge -- gets a
+            // full DIM_TIMEOUT before anything happens. Also undoes any dimming
+            // left over from before idling became blocked.
+            self.idle_reset();
             return;
         }
 

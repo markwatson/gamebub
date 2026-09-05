@@ -20,10 +20,12 @@ pub const DIM_TIMEOUT: Duration = Duration::from_secs(60);
 /// Fraction of the configured brightness to use while dimmed.
 const DIM_FACTOR: f32 = 0.25;
 
+/// Labels for the "Auto Power Off" setting, in [`POWER_OFF_TIMEOUTS`] order.
+pub const POWER_OFF_CHOICES: &[&str] =
+    &["Off", "2 minutes", "5 minutes", "10 minutes", "30 minutes"];
+
 /// Idle timeouts offered by the "Auto Power Off" setting, indexed by its value.
 /// `None` disables automatic power off.
-///
-/// Must be kept in sync with the setting's choices in [`super::state`].
 const POWER_OFF_TIMEOUTS: &[Option<Duration>] = &[
     None,
     Some(Duration::from_secs(2 * 60)),
@@ -32,9 +34,14 @@ const POWER_OFF_TIMEOUTS: &[Option<Duration>] = &[
     Some(Duration::from_secs(30 * 60)),
 ];
 
+const _: () = assert!(POWER_OFF_TIMEOUTS.len() == POWER_OFF_CHOICES.len());
+
 /// How long to wait after dimming before powering off, or `None` if automatic
 /// power off is disabled.
 pub fn power_off_delay() -> Option<Duration> {
+    // `get` already substitutes the key's own default (5 minutes), so this
+    // fallback only fires if the read itself fails. Index 0 is "Off": if we
+    // can't tell what the user asked for, don't power their device off.
     let index = kvs::keys::AUTO_POWER_OFF.get().unwrap_or_default();
     // A negative index wraps to a large `usize`, which `get` rejects.
     let timeout = (*POWER_OFF_TIMEOUTS.get(index as usize)?)?;
@@ -48,16 +55,24 @@ pub fn may_idle() -> bool {
     if !matches!(*bitstream::current(), CurrentBitstream::None) {
         return false;
     }
-    // Mass storage and cartridge reader sessions run without any button input.
+    let device = Device::lock();
+
+    // Mass storage and cartridge reader sessions run without any button input --
+    // but only while a host is actually attached. Neither mode is reset by
+    // unplugging the cable, only by ending the session from the Tools screen, so
+    // without the VBUS check pulling the cable would leave the device unable to
+    // ever idle again.
     if !matches!(
         usb::current_mode(),
         UsbMode::SerialJtag | UsbMode::ConsoleOnly
-    ) {
+    ) && device.get_vbus_pgood()
+    {
         return false;
     }
+
     // Docked: the internal backlight is already off, and the user is looking at
     // the external display.
-    Device::lock().get_display_mode() == DisplayMode::Internal
+    device.get_display_mode() == DisplayMode::Internal
 }
 
 /// Whether the device may power itself off right now.
