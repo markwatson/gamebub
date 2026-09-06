@@ -7,7 +7,13 @@ so.
 
 ## Quick reference
 
+Prerequisites: [Rust for ESP32 (Xtensa
+targets)](https://docs.esp-rs.org/book/installation/index.html) and
+[espflash](https://github.com/esp-rs/espflash).
+
 Enter the ROM serial bootloader: **hold Home, press Power**, connect USB-C.
+Enter DFU (the virtual USB drive): **hold Volume−, press Power** — the purple
+LED blinks twice repeatedly and the screen stays dark.
 
 ```sh
 # From firmware/handheld. The runner in .cargo/config.toml passes these already.
@@ -109,6 +115,71 @@ espflash write-bin 0x100000 app_from_uf2.bin
 The UF2 contains **nothing below 0x80000** — no bootloader, no partition table,
 no DFU app. Those come from the repo (`bootloader.bin`, `partitions.csv`) and
 from building `handheld-dfu`.
+
+## Building a UF2 update file
+
+Firmware can also be packaged as a UF2 and installed through the DFU
+bootloader's virtual USB drive, with no serial connection. This is how the
+updates on the [releases
+page](https://github.com/elipsitz/gamebub/releases) are distributed — see the
+[firmware update guide](https://docs.gamebub.net/user-guide/firmware-updates/).
+
+Build the firmware, save the application image, pad it to a multiple of 256
+bytes, and wrap it in a UF2:
+
+```sh
+cargo build --release --features=rev4
+espflash save-image --chip esp32s3 target/xtensa-esp32s3-espidf/release/handheld handheld.bin
+python3 -c 'import sys; f = open(sys.argv[1], "ab"); f.write(b"\xff" * (-f.tell() % 256))' handheld.bin
+esptool.py --chip esp32s3 merge_bin --format uf2 --chunk-size 256 -o handheld.uf2 0x100000 handheld.bin
+```
+
+Use the `--features` flag matching your board. This matters more here than over
+serial: see the note on revision tags below.
+
+`0x100000` is the offset of the `factory` partition in `partitions.csv`. Writing
+UF2 files requires esptool v4.6 or newer — the copy installed alongside ESP-IDF
+works (`~/.espressif/python_env/idf*/bin/python -m esptool`), while an older
+standalone `esptool.py` fails with
+`argument --format/-f: invalid choice: 'uf2'`.
+
+The DFU bootloader **silently ignores any block it doesn't accept** (see
+`../handheld-dfu/src/virtual_disk.rs`). A file with rejected blocks looks like a
+copy that never finishes: the device waits for the missing blocks and never
+reboots. In particular:
+
+* Every block's payload must be exactly 256 bytes. Pass `--chunk-size 256`
+  (esptool otherwise uses the largest size that fits, 452), and pad the image
+  first, or the short final block esptool emits will be dropped.
+* The UF2 family ID must be `0xc47e5767` (ESP32-S3), which `--chip esp32s3`
+  sets.
+* Nothing below `0x80000` can be written — the bootloader, the DFU partition
+  itself, and the read-only NVS partition are write protected. Don't build the
+  UF2 from a merged full-flash image.
+* Don't pass more than one region to a single `merge_bin`. The device tracks a
+  transfer by the `numBlocks` field and reboots as soon as it has received that
+  many blocks; esptool restarts both the block number and `numBlocks` for each
+  input file, so the first region satisfies its own count and everything after
+  it in the file is lost.
+
+The released images do cover two regions in one file — the application at
+`0x100000` and system data at `0x600000` — with block numbers running
+continuously across both, which the bootloader handles as a single transfer.
+`merge_bin` cannot produce that layout; building it requires writing the UF2
+blocks directly. With esptool, update system data as a separate UF2 at
+`0x600000`, built from a FAT image (`fatfsgen.py`, as used by
+`flash_system_data.py`), and copy it after rebooting back into DFU mode.
+
+Release builds carry UF2 extension tags that files built with the commands above
+do not: tag `0xc8a729` holds `bub!` followed by the hardware revision the image
+was built for, and `0x8a4e54` holds the git commit hash. The bootloader checks
+the revision tag before writing a block and refuses images built for another
+revision — **but only when the tag is present**. An untagged file built as above
+will install on any revision, so the `--features` flag is the only thing between
+a wrong build and a device that boots to a blank screen.
+
+To recover from that, reflash over serial (hold Home, press Power), or enter DFU
+(hold Volume−, press Power) and copy a known-good UF2.
 
 ## Reading the device
 
